@@ -1,4 +1,4 @@
-const CACHE = 'kameido-bus-v6';
+const CACHE = "kameido-bus-v2";
 const ASSETS = [
   '/',
   '/static/style.css',
