@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>亀戸バス</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <p class="eyebrow">朝のバス接近情報</p>
+      <h1>{{ target_stop }} <span>→ 亀戸方面</span></h1>
+      <p class="routes">{{ routes }}</p>
+    </header>
+
+    <section id="status" class="status">取得しています…</section>
+    <section id="cards" class="cards" aria-live="polite"></section>
+
+    <footer>
+      <div><span id="updated">最終更新 --:--:--</span><span id="countdown"></span></div>
+      <button id="reload" type="button">今すぐ更新</button>
+      <p>データ提供：東京都交通局・公共交通オープンデータ協議会</p>
+      <p class="note" id="note"></p>
+    </footer>
+  </main>
+  <script>
+    const REFRESH_SECONDS = {{ refresh_seconds }};
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

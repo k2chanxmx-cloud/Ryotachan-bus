@@ -1,0 +1,9 @@
+{
+  "name": "亀戸バス接近情報",
+  "short_name": "亀戸バス",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070b14",
+  "theme_color": "#111827",
+  "description": "亀戸七丁目から亀戸方面へ向かう都営バス接近情報"
+}

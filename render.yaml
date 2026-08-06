@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: kameido-bus
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 60
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: ODPT_ACCESS_TOKEN
+        sync: false
+      - key: REFRESH_SECONDS
+        value: 20
