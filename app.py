@@ -124,6 +124,8 @@ def get_patterns() -> list[dict]:
 
 
 def selected_patterns() -> dict[str, dict]:
+    # Bus realtime rows identify a service with odpt:busroute, not
+    # odpt:busroutePattern. Therefore index selected patterns by busroute ID.
     selected: dict[str, dict] = {}
     stop_titles = get_stop_titles()
     for pattern in get_patterns():
@@ -147,7 +149,14 @@ def selected_patterns() -> dict[str, dict]:
         copied = dict(pattern)
         copied["_resolved_route"] = route
         copied["_stop_titles"] = stop_titles
-        selected[str(pattern.get("owl:sameAs"))] = copied
+        pattern_id = str(pattern.get("owl:sameAs") or "")
+        busroute_id = str(pattern.get("odpt:busroute") or "")
+        if busroute_id:
+            selected[busroute_id] = copied
+            selected[compact_id(busroute_id)] = copied
+        if pattern_id:
+            selected[pattern_id] = copied
+            selected[compact_id(pattern_id)] = copied
     return selected
 
 
@@ -213,7 +222,11 @@ def build_arrival(bus: dict, pattern: dict) -> dict | None:
         "location": location_name,
         "arrivalTime": datetime.fromtimestamp(arrival_time, JST).strftime("%H:%M"),
         "delayMinutes": round(delay_sec / 60),
-        "vehicleId": compact_id(bus.get("odpt:vehicleNumber") or bus.get("owl:sameAs")),
+        "vehicleId": compact_id(
+            bus.get("odpt:busNumber")
+            or bus.get("odpt:vehicleNumber")
+            or bus.get("owl:sameAs")
+        ),
         "isRealtime": True,
     }
 
@@ -236,12 +249,22 @@ def arrivals():
         if not patterns:
             raise RuntimeError("対象方向の路線データを特定できませんでした")
         rows = []
-        for bus in get_buses():
+        buses = get_buses()
+        app.logger.info(
+            "ODPT resolved: selected_pattern_keys=%s realtime_buses=%s",
+            len(patterns), len(buses)
+        )
+        for bus in buses:
+            # Toei odpt:Bus provides odpt:busroute. Older/other feeds may
+            # additionally expose odpt:busroutePattern, so support both.
+            route_id = str(bus.get("odpt:busroute") or "")
             pattern_id = str(bus.get("odpt:busroutePattern") or "")
-            pattern = patterns.get(pattern_id)
-            if not pattern:
-                # ODPT IDs can differ by prefix versions; compare compact tail as fallback.
-                pattern = next((p for pid, p in patterns.items() if compact_id(pid) == compact_id(pattern_id)), None)
+            pattern = (
+                patterns.get(route_id)
+                or patterns.get(compact_id(route_id))
+                or patterns.get(pattern_id)
+                or patterns.get(compact_id(pattern_id))
+            )
             if not pattern:
                 continue
             row = build_arrival(bus, pattern)
@@ -262,7 +285,12 @@ def arrivals():
             "updatedAt": now.strftime("%H:%M:%S"),
             "refreshSeconds": REFRESH_SECONDS,
             "arrivals": rows,
-            "message": "接近中の車両が見つかりません" if not rows else "",
+            "message": "現在、亀戸七丁目へ接近中の対象車両はありません" if not rows else "",
+            "debug": {
+                "selectedPatternKeys": len(patterns),
+                "realtimeBusCount": len(buses),
+                "matchedArrivalCount": len(rows),
+            },
             "estimateNote": "到着分数は車両位置・停留所数・遅延から算出した目安です。",
         })
     except requests.HTTPError as exc:
