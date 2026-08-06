@@ -117,20 +117,6 @@ def get_stop_titles() -> dict[str, str]:
     return cached("stop_titles", 6 * 60 * 60, load)
 
 
-def get_route_titles() -> dict[str, str]:
-    def load():
-        rows = odpt_get("odpt:Busroute", {"odpt:operator": "odpt.Operator:Toei"})
-        result: dict[str, str] = {}
-        for row in rows:
-            route_id = str(row.get("owl:sameAs") or "")
-            name = title_text(row.get("odpt:busrouteTitle")) or title_text(row.get("dc:title"))
-            if route_id and name:
-                result[route_id] = name
-                result[compact_id(route_id)] = name
-        return result
-    return cached("route_titles", 6 * 60 * 60, load)
-
-
 def get_patterns() -> list[dict]:
     def load():
         return odpt_get("odpt:BusroutePattern", {"odpt:operator": "odpt.Operator:Toei"})
@@ -140,9 +126,8 @@ def get_patterns() -> list[dict]:
 def selected_patterns() -> dict[str, dict]:
     selected: dict[str, dict] = {}
     stop_titles = get_stop_titles()
-    route_titles = get_route_titles()
     for pattern in get_patterns():
-        route = route_label(pattern, route_titles)
+        route = route_label(pattern)
         if route not in TARGET_ROUTES:
             continue
         orders = pattern.get("odpt:busstopPoleOrder") or []
@@ -281,8 +266,17 @@ def arrivals():
             "estimateNote": "到着分数は車両位置・停留所数・遅延から算出した目安です。",
         })
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else 502
-        detail = "API認証に失敗しました" if status in (401, 403) else "交通データを取得できませんでした"
+        response = exc.response
+        status = response.status_code if response is not None else 502
+        request_url = response.request.url if response is not None and response.request is not None else "unknown"
+        response_preview = (response.text or "")[:500] if response is not None else ""
+        app.logger.error(
+            "ODPT request failed: status=%s url=%s body=%s",
+            status,
+            request_url.replace(ODPT_TOKEN, "***") if ODPT_TOKEN else request_url,
+            response_preview,
+        )
+        detail = "API認証に失敗しました" if status in (401, 403) else f"交通データを取得できませんでした（ODPT: {status}）"
         return jsonify({"ok": False, "updatedAt": now.strftime("%H:%M:%S"), "error": detail}), 502
     except Exception as exc:
         app.logger.exception("arrival API failed")
