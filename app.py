@@ -124,39 +124,71 @@ def get_patterns() -> list[dict]:
 
 
 def selected_patterns() -> dict[str, dict]:
-    # Bus realtime rows identify a service with odpt:busroute, not
-    # odpt:busroutePattern. Therefore index selected patterns by busroute ID.
+    """Select routes by their stop sequence and terminal stop.
+
+    ODPT route titles/IDs are not stable enough to identify Japanese route labels.
+    For this app, the destination terminal uniquely identifies each desired route:
+      亀戸駅前 -> 亀26
+      錦糸町駅前 -> 錦25
+      両国駅前 -> 錦27
+    """
+    destination_to_route = {
+        "亀戸駅前": "亀26",
+        "錦糸町駅前": "錦25",
+        "両国駅前": "錦27",
+    }
     selected: dict[str, dict] = {}
     stop_titles = get_stop_titles()
+
     for pattern in get_patterns():
-        route = route_label(pattern)
-        if route not in TARGET_ROUTES:
-            continue
         orders = pattern.get("odpt:busstopPoleOrder") or []
+        if not orders:
+            continue
+
         names = [stop_name_from_order(x, stop_titles) for x in orders]
         target_indexes = [i for i, name in enumerate(names) if TARGET_STOP_NAME in name]
         if not target_indexes:
             continue
 
-        destination = destination_text(pattern)
-        # 亀戸方面は亀戸七丁目が路線後半にある方向。
-        # 行先文字列が取得できる場合は終点名も併用する。
-        destination_match = any(dest in destination for dest in TARGET_DESTINATIONS)
-        target_in_latter_half = target_indexes[0] >= max(1, len(names) // 2)
-        if not destination_match and not target_in_latter_half:
+        # Determine direction from the actual final stop in the ordered stop list.
+        terminal_name = names[-1] if names else ""
+        resolved_destination = next(
+            (dest for dest in TARGET_DESTINATIONS if dest in terminal_name),
+            None,
+        )
+
+        # Some feeds expose the destination only in a metadata field.
+        if resolved_destination is None:
+            metadata_destination = destination_text(pattern)
+            resolved_destination = next(
+                (dest for dest in TARGET_DESTINATIONS if dest in metadata_destination),
+                None,
+            )
+
+        if resolved_destination is None:
+            continue
+
+        resolved_route = destination_to_route.get(resolved_destination)
+        if resolved_route not in TARGET_ROUTES:
+            continue
+
+        # The target must occur before the terminal stop.
+        target_index = target_indexes[0]
+        if target_index >= len(names) - 1:
             continue
 
         copied = dict(pattern)
-        copied["_resolved_route"] = route
+        copied["_resolved_route"] = resolved_route
+        copied["_resolved_destination"] = resolved_destination
         copied["_stop_titles"] = stop_titles
+
         pattern_id = str(pattern.get("owl:sameAs") or "")
         busroute_id = str(pattern.get("odpt:busroute") or "")
-        if busroute_id:
-            selected[busroute_id] = copied
-            selected[compact_id(busroute_id)] = copied
-        if pattern_id:
-            selected[pattern_id] = copied
-            selected[compact_id(pattern_id)] = copied
+        for key in (busroute_id, pattern_id):
+            if key:
+                selected[key] = copied
+                selected[compact_id(key)] = copied
+
     return selected
 
 
@@ -211,7 +243,7 @@ def build_arrival(bus: dict, pattern: dict) -> dict | None:
 
     route = str(pattern.get("_resolved_route") or route_label(pattern))
     destination = destination_text(pattern)
-    destination_name = next((d for d in TARGET_DESTINATIONS if d in destination), "亀戸方面")
+    destination_name = str(pattern.get("_resolved_destination") or next((d for d in TARGET_DESTINATIONS if d in destination), "亀戸方面"))
     location_name = stop_name_from_order(orders[current_i], stop_titles)
 
     return {
@@ -309,6 +341,41 @@ def arrivals():
     except Exception as exc:
         app.logger.exception("arrival API failed")
         return jsonify({"ok": False, "updatedAt": now.strftime("%H:%M:%S"), "error": str(exc)}), 500
+
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    """Return non-secret matching diagnostics for deployment troubleshooting."""
+    now = datetime.now(JST)
+    try:
+        stop_titles = get_stop_titles()
+        candidates = []
+        for pattern in get_patterns():
+            orders = pattern.get("odpt:busstopPoleOrder") or []
+            names = [stop_name_from_order(x, stop_titles) for x in orders]
+            if any(TARGET_STOP_NAME in name for name in names):
+                candidates.append({
+                    "patternId": compact_id(pattern.get("owl:sameAs")),
+                    "busrouteId": compact_id(pattern.get("odpt:busroute")),
+                    "title": route_label(pattern),
+                    "metadataDestination": destination_text(pattern),
+                    "firstStop": names[0] if names else "",
+                    "lastStop": names[-1] if names else "",
+                    "targetIndex": next((i for i, n in enumerate(names) if TARGET_STOP_NAME in n), None),
+                    "stopCount": len(names),
+                })
+        selected = selected_patterns()
+        return jsonify({
+            "ok": True,
+            "updatedAt": now.strftime("%H:%M:%S"),
+            "targetStop": TARGET_STOP_NAME,
+            "candidateCount": len(candidates),
+            "selectedPatternKeys": len(selected),
+            "candidates": candidates[:30],
+        })
+    except Exception as exc:
+        app.logger.exception("diagnostics failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.get("/health")
