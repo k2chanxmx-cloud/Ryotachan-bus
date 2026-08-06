@@ -60,10 +60,14 @@ def compact_id(value: Any) -> str:
     return text.rsplit(":", 1)[-1]
 
 
-def route_label(pattern: dict) -> str:
+def route_label(pattern: dict, route_titles: dict[str, str] | None = None) -> str:
+    route_id = str(pattern.get("odpt:busroute") or "")
     candidates = [
         title_text(pattern.get("odpt:busroutePatternTitle")),
         title_text(pattern.get("dc:title")),
+        (route_titles or {}).get(route_id, ""),
+        (route_titles or {}).get(compact_id(route_id), ""),
+        compact_id(route_id),
         compact_id(pattern.get("owl:sameAs")),
     ]
     merged = " ".join(candidates)
@@ -84,12 +88,47 @@ def destination_text(pattern: dict) -> str:
     return " ".join(v for v in values if v)
 
 
-def stop_name_from_order(item: dict) -> str:
-    return title_text(item.get("odpt:busstopPoleTitle")) or compact_id(item.get("odpt:busstopPole"))
+def stop_name_from_order(item: dict, stop_titles: dict[str, str] | None = None) -> str:
+    stop_id = str(item.get("odpt:busstopPole") or item.get("owl:sameAs") or "")
+    return (
+        title_text(item.get("odpt:busstopPoleTitle"))
+        or (stop_titles or {}).get(stop_id, "")
+        or (stop_titles or {}).get(compact_id(stop_id), "")
+        or compact_id(stop_id)
+    )
 
 
 def stop_id_from_order(item: dict) -> str:
     return str(item.get("odpt:busstopPole") or item.get("owl:sameAs") or "")
+
+
+
+def get_stop_titles() -> dict[str, str]:
+    def load():
+        rows = odpt_get("odpt:BusstopPole", {"odpt:operator": "odpt.Operator:Toei"})
+        result: dict[str, str] = {}
+        for row in rows:
+            stop_id = str(row.get("owl:sameAs") or "")
+            name = title_text(row.get("odpt:busstopPoleTitle")) or title_text(row.get("dc:title"))
+            if stop_id and name:
+                result[stop_id] = name
+                result[compact_id(stop_id)] = name
+        return result
+    return cached("stop_titles", 6 * 60 * 60, load)
+
+
+def get_route_titles() -> dict[str, str]:
+    def load():
+        rows = odpt_get("odpt:Busroute", {"odpt:operator": "odpt.Operator:Toei"})
+        result: dict[str, str] = {}
+        for row in rows:
+            route_id = str(row.get("owl:sameAs") or "")
+            name = title_text(row.get("odpt:busrouteTitle")) or title_text(row.get("dc:title"))
+            if route_id and name:
+                result[route_id] = name
+                result[compact_id(route_id)] = name
+        return result
+    return cached("route_titles", 6 * 60 * 60, load)
 
 
 def get_patterns() -> list[dict]:
@@ -100,22 +139,30 @@ def get_patterns() -> list[dict]:
 
 def selected_patterns() -> dict[str, dict]:
     selected: dict[str, dict] = {}
+    stop_titles = get_stop_titles()
+    route_titles = get_route_titles()
     for pattern in get_patterns():
-        route = route_label(pattern)
+        route = route_label(pattern, route_titles)
         if route not in TARGET_ROUTES:
             continue
         orders = pattern.get("odpt:busstopPoleOrder") or []
-        names = [stop_name_from_order(x) for x in orders]
-        if not any(TARGET_STOP_NAME in name for name in names):
+        names = [stop_name_from_order(x, stop_titles) for x in orders]
+        target_indexes = [i for i, name in enumerate(names) if TARGET_STOP_NAME in name]
+        if not target_indexes:
             continue
+
         destination = destination_text(pattern)
-        # Direction filter: routes on the opposite side do not head toward these termini.
-        if TARGET_DESTINATIONS and not any(dest in destination for dest in TARGET_DESTINATIONS):
-            # Some records omit destination text. Accept patterns where target is near route end.
-            target_indexes = [i for i, n in enumerate(names) if TARGET_STOP_NAME in n]
-            if not target_indexes or target_indexes[0] > len(names) * 0.7:
-                continue
-        selected[str(pattern.get("owl:sameAs"))] = pattern
+        # 亀戸方面は亀戸七丁目が路線後半にある方向。
+        # 行先文字列が取得できる場合は終点名も併用する。
+        destination_match = any(dest in destination for dest in TARGET_DESTINATIONS)
+        target_in_latter_half = target_indexes[0] >= max(1, len(names) // 2)
+        if not destination_match and not target_in_latter_half:
+            continue
+
+        copied = dict(pattern)
+        copied["_resolved_route"] = route
+        copied["_stop_titles"] = stop_titles
+        selected[str(pattern.get("owl:sameAs"))] = copied
     return selected
 
 
@@ -123,7 +170,7 @@ def get_buses() -> list[dict]:
     return odpt_get("odpt:Bus", {"odpt:operator": "odpt.Operator:Toei"})
 
 
-def index_of_stop(orders: list[dict], stop_id: str | None, stop_name: str | None = None) -> int | None:
+def index_of_stop(orders: list[dict], stop_id: str | None, stop_name: str | None = None, stop_titles: dict[str, str] | None = None) -> int | None:
     if stop_id:
         for i, item in enumerate(orders):
             item_id = stop_id_from_order(item)
@@ -131,14 +178,15 @@ def index_of_stop(orders: list[dict], stop_id: str | None, stop_name: str | None
                 return i
     if stop_name:
         for i, item in enumerate(orders):
-            if stop_name in stop_name_from_order(item):
+            if stop_name in stop_name_from_order(item, stop_titles):
                 return i
     return None
 
 
 def build_arrival(bus: dict, pattern: dict) -> dict | None:
     orders = pattern.get("odpt:busstopPoleOrder") or []
-    target_i = index_of_stop(orders, None, TARGET_STOP_NAME)
+    stop_titles = pattern.get("_stop_titles") or {}
+    target_i = index_of_stop(orders, None, TARGET_STOP_NAME, stop_titles)
     if target_i is None:
         return None
 
@@ -167,10 +215,10 @@ def build_arrival(bus: dict, pattern: dict) -> dict | None:
     eta_minutes = max(1, round(segments * MINUTES_PER_STOP + delay_sec / 60))
     arrival_time = datetime.now(JST).timestamp() + eta_minutes * 60
 
-    route = route_label(pattern)
+    route = str(pattern.get("_resolved_route") or route_label(pattern))
     destination = destination_text(pattern)
     destination_name = next((d for d in TARGET_DESTINATIONS if d in destination), "亀戸方面")
-    location_name = stop_name_from_order(orders[current_i])
+    location_name = stop_name_from_order(orders[current_i], stop_titles)
 
     return {
         "route": route,
